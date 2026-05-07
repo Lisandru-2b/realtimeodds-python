@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "realtimeodds"
+version = "0.1.0"
+description = "Real-time betting odds SDK — multi-bookmaker, sport-discriminated, asyncio."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Lisandru", email = "barrallisandru@gmail.com" }]
+keywords = ["realtimeodds", "betting", "odds", "websocket", "sdk", "sports"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "websockets>=12.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Lisandru-2b/realtimeodds-python"
+Repository = "https://github.com/Lisandru-2b/realtimeodds-python"
+Issues = "https://github.com/Lisandru-2b/realtimeodds-python/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.13",
+    "ruff>=0.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/realtimeodds"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/realtimeodds",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src/realtimeodds", "tests"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_decorators = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+ignore = ["E501", "RUF022"]
