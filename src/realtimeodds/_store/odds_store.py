@@ -85,6 +85,18 @@ class OddsStore:
         self._by_kind.clear()
         self._emitter.emit("store:cleared", None)
 
+    def replace_with_snapshot(self, events: list[SportEvent]) -> None:
+        """Atomically replace the store's contents with the given list of sport
+        events. Used by `resync` handling — the previous view is discarded
+        before the new one is inserted, and no per-event upsert/remove signals
+        are emitted (callers consuming the resync event do their own rebuild).
+        """
+        self._sport_events.clear()
+        self._by_kind.clear()
+        for ev in events:
+            self._sport_events[ev.id] = ev
+            self._by_kind.setdefault(ev.kind, {})[ev.id] = ev
+
     # ─── Queries ────────────────────────────────────────────────────────────
 
     def get_sport_event(self, sport_event_id: SportEventId) -> SportEvent | None:

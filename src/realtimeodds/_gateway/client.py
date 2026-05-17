@@ -43,12 +43,13 @@ class GatewayClient:
       - `incompatible` ({reason, server_version})
       - `warning` ({reason})
       - `error` (exception)
-      - `source:added` (source_id, store)
+      - `source:added` ((source_id, store))
       - `source:cleared` (source_id)
-      - `preset_list` (presets)
-      - `preset:updated` (preset)
-      - `preset:removed` (preset_id)
-      - `fetcher:status` (preset)
+      - `source:resynced` ((source_id, reason, store))
+      - `preset_list` (presets) — admin only, fires on token-auth connections
+      - `preset:updated` (preset) — admin only
+      - `preset:removed` (preset_id) — admin only
+      - `fetcher:status` (preset) — admin only
     """
 
     __slots__ = (
@@ -287,6 +288,18 @@ class GatewayClient:
             if existing is not None:
                 existing.clear()
                 self.events.emit("source:cleared", source)
+            return
+        if msg_type == "resync":
+            source = msg.get("source")
+            if source is None:
+                return
+            reason = str(msg.get("reason", ""))
+            store = self.get_or_create_store(source)
+            # Atomic full-state replacement: rebuild SportEvent instances from
+            # the wire payload and swap the store's contents in one shot.
+            events = [sport_event_from_json(raw) for raw in msg.get("data", [])]
+            store.replace_with_snapshot(events)
+            self.events.emit("source:resynced", (source, reason, store))
             return
         if msg_type == "fetcher_status":
             self.events.emit("fetcher:status", msg.get("data"))

@@ -17,6 +17,7 @@ Quickstart:
     >>> asyncio.run(main())
 """
 
+from ._book import OddsBook, OddsContext
 from ._entities import (
     BasketballHandicap,
     BasketballMatch,
@@ -58,14 +59,15 @@ from .client import (
     ErrorEvent,
     OddsChangedEvent,
     ReconnectingEvent,
-    Snapshot,
+    ResyncEvent,
+    SourceClearedEvent,
     SportEventAddedEvent,
     SportEventRemovedEvent,
     SportEventUpdatedEvent,
     create_client,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # Client surface
@@ -74,10 +76,13 @@ __all__ = [
     "ConnectionStatus",
     "DisconnectedEvent",
     "ErrorEvent",
+    "OddsBook",
     "OddsChangedEvent",
+    "OddsContext",
     "ReconnectPolicy",
     "ReconnectingEvent",
-    "Snapshot",
+    "ResyncEvent",
+    "SourceClearedEvent",
     "SportEventAddedEvent",
     "SportEventRemovedEvent",
     "SportEventUpdatedEvent",

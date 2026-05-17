@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlencode, urlparse, urlunparse
 
+from ._book import OddsBook, OddsBookImpl
 from ._emitter import TypedEmitter
 from ._entities import Quote, SportEvent
 from ._gateway import GatewayClient, ReconnectPolicy
@@ -26,14 +27,6 @@ ConnectionStatus = Literal["disconnected", "connecting", "connected", "reconnect
 class ConnectionState:
     status: ConnectionStatus
     last_error: Exception | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class Snapshot:
-    """Current state of the SDK's mirrored stores. Marked `stale` when not connected."""
-
-    sport_events: Mapping[SportEventId, SportEvent]
-    stale: bool
 
 
 # ─── Event payload dataclasses ─────────────────────────────────────────────
@@ -87,6 +80,30 @@ class OddsChangedEvent:
     received_at: int
 
 
+@dataclass(frozen=True, slots=True)
+class SourceClearedEvent:
+    """An entire bookmaker source went away. The SDK has already purged every
+    sport event belonging to this bookmaker from ``client.odds`` before this
+    event fires.
+    """
+
+    bookmaker: Bookmaker
+    received_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class ResyncEvent:
+    """Atomic full-state replacement for one bookmaker. The live ``OddsBook``
+    has already swapped the affected slice before this event fires. Consumers
+    maintaining derived state should rebuild it from ``sport_events``.
+    """
+
+    bookmaker: Bookmaker
+    reason: str
+    sport_events: tuple[SportEvent, ...]
+    received_at: int
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -126,15 +143,16 @@ class _PendingConnect:
 class Client:
     """The realtimeodds SDK client.
 
-    Open the WebSocket with `await client.connect()`, subscribe to events with
-    `client.on(name, callback)`. The client auto-reconnects with exponential
-    backoff on transient drops.
+    Open the WebSocket with ``await client.connect()``, subscribe to events
+    with ``client.on(name, callback)``. The client auto-reconnects with
+    exponential backoff on transient drops.
     """
 
     __slots__ = (
         "_api_key",
         "_emitter",
         "_gw",
+        "_live_book",
         "_pending",
         "_reconnect",
         "_state",
@@ -161,12 +179,40 @@ class Client:
         self._gw: GatewayClient | None = None
         self._pending: _PendingConnect | None = None
         self._wired_stores: set[int] = set()
+        self._live_book = OddsBookImpl()
 
     # ─── Public surface ─────────────────────────────────────────────────────
 
     @property
     def connection_state(self) -> ConnectionState:
         return self._state
+
+    @property
+    def odds(self) -> OddsBook:
+        """Live ``OddsBook`` — same instance every read, mutated in place as
+        wire messages arrive. Reads inside event handlers see the freshest
+        state. Beware: ``size`` and lookup results change between two reads
+        if events are flowing.
+
+        On disconnect the live book is emptied immediately; on reconnect it
+        repopulates from the server snapshot.
+        """
+        return self._live_book
+
+    def snapshot(self) -> OddsBook:
+        """Frozen clone of the live book taken at the moment of the call.
+
+        Subsequent live mutations do not affect a returned snapshot. Use when
+        you need a stable view across multiple reads.
+        """
+        return self._live_book.clone()
+
+    def get_sport_event(self, sport_event_id: SportEventId) -> SportEvent | None:
+        """O(1) single lookup. Returns ``None`` for unknown ids.
+
+        Convenience shortcut for ``client.odds.get_sport_event(id)``.
+        """
+        return self._live_book.get_sport_event(sport_event_id)
 
     def on(self, event: str, listener: Callable[[Any], None]) -> None:
         self._emitter.on(event, listener)
@@ -181,7 +227,7 @@ class Client:
         incompatible protocol). Transient errors keep retrying — the coroutine
         stays pending until either success or fatal.
 
-        Calling `connect()` while a connection attempt is in flight returns
+        Calling ``connect()`` while a connection attempt is in flight returns
         the same future. Calling after a successful connection resolves
         immediately.
         """
@@ -211,7 +257,8 @@ class Client:
     async def disconnect(self) -> None:
         """Close and stop reconnecting. Idempotent.
 
-        If a `connect()` is in flight, it will raise.
+        If a ``connect()`` is in flight, it will raise. The live ``OddsBook``
+        is emptied immediately.
         """
         if self._pending is not None and not self._pending.future.done():
             self._pending.future.set_exception(
@@ -220,28 +267,8 @@ class Client:
         if self._gw is not None:
             await self._gw.disconnect()
             self._gw = None
+        self._live_book.clear()
         self._state = ConnectionState(status="disconnected")
-
-    def snapshot(self) -> Snapshot:
-        """Return a read-only mapping of every known sport event, keyed by id.
-
-        `stale=True` when the connection is not currently established.
-        """
-        sport_events: dict[SportEventId, SportEvent] = {}
-        if self._gw is not None:
-            for store in self._gw.get_stores().values():
-                for sport_event_id, sport_event in store.get_all_sport_events().items():
-                    sport_events[sport_event_id] = sport_event
-        return Snapshot(sport_events=sport_events, stale=self._state.status != "connected")
-
-    def get_sport_event(self, sport_event_id: SportEventId) -> SportEvent | None:
-        if self._gw is None:
-            return None
-        for store in self._gw.get_stores().values():
-            sport_event = store.get_sport_event(sport_event_id)
-            if sport_event is not None:
-                return sport_event
-        return None
 
     # ─── Gateway → public translation ────────────────────────────────────────
 
@@ -253,6 +280,8 @@ class Client:
         gw.events.on("incompatible", self._on_gw_incompatible)
         gw.events.on("error", self._on_gw_error)
         gw.events.on("source:added", self._on_gw_source_added)
+        gw.events.on("source:cleared", self._on_gw_source_cleared)
+        gw.events.on("source:resynced", self._on_gw_source_resynced)
 
     def _on_gw_connected(self, _payload: object) -> None:
         self._state = ConnectionState(status="connected")
@@ -264,6 +293,10 @@ class Client:
         will_reconnect = bool(payload.get("will_reconnect", False))
         code = int(payload.get("code", 0))
         reason = str(payload.get("reason", ""))
+        # Empty the live book immediately — the connection is gone, the
+        # mirror is invalid. The `disconnected` event is the sole signal:
+        # no per-event sportEvent:removed or source:cleared is emitted.
+        self._live_book.clear()
         self._emitter.emit(
             "disconnected",
             DisconnectedEvent(will_reconnect=will_reconnect, code=code, reason=reason),
@@ -314,8 +347,32 @@ class Client:
         if sentinel in self._wired_stores:
             return
         self._wired_stores.add(sentinel)
-        bookmaker: Bookmaker = source  # type: ignore[assignment]
+        bookmaker = cast(Bookmaker, source)
         self._wire_store(store, bookmaker)
+
+    def _on_gw_source_cleared(self, source: str) -> None:
+        bookmaker = cast(Bookmaker, source)
+        removed = self._live_book.clear_bookmaker(bookmaker)
+        if removed > 0:
+            self._emitter.emit(
+                "source:cleared",
+                SourceClearedEvent(bookmaker=bookmaker, received_at=_now_ms()),
+            )
+
+    def _on_gw_source_resynced(self, payload: tuple[str, str, OddsStore]) -> None:
+        source, reason, store = payload
+        bookmaker = cast(Bookmaker, source)
+        sport_events: tuple[SportEvent, ...] = tuple(store.get_all_sport_events().values())
+        self._live_book.replace_bookmaker(bookmaker, sport_events)
+        self._emitter.emit(
+            "resync",
+            ResyncEvent(
+                bookmaker=bookmaker,
+                reason=reason,
+                sport_events=sport_events,
+                received_at=_now_ms(),
+            ),
+        )
 
     def _wire_store(self, store: OddsStore, bookmaker: Bookmaker) -> None:
         def on_upserted(payload: object) -> None:
@@ -323,23 +380,28 @@ class Client:
 
             assert isinstance(payload, SportEventUpsertedPayload)
             received_at = _now_ms()
-            if payload.is_new:
+            ev = payload.sport_event
+            # `added` vs `updated` is decided against the live book, not the
+            # gateway store's `is_new` flag. After a disconnect the live book
+            # is cleared but the gateway store may still hold prior entities.
+            was_present = self._live_book.get_sport_event(ev.id) is not None
+            self._live_book.upsert(ev)
+            if was_present:
                 self._emitter.emit(
-                    "sportEvent:added",
-                    SportEventAddedEvent(sport_event=payload.sport_event, received_at=received_at),
+                    "sportEvent:updated",
+                    SportEventUpdatedEvent(sport_event=ev, received_at=received_at),
                 )
             else:
                 self._emitter.emit(
-                    "sportEvent:updated",
-                    SportEventUpdatedEvent(
-                        sport_event=payload.sport_event, received_at=received_at
-                    ),
+                    "sportEvent:added",
+                    SportEventAddedEvent(sport_event=ev, received_at=received_at),
                 )
 
         def on_removed(payload: object) -> None:
             from ._store import SportEventRemovedPayload
 
             assert isinstance(payload, SportEventRemovedPayload)
+            self._live_book.remove(payload.sport_event_id)
             self._emitter.emit(
                 "sportEvent:removed",
                 SportEventRemovedEvent(
@@ -356,6 +418,7 @@ class Client:
             received_at = _now_ms()
             updated = store.get_sport_event(payload.sport_event_id)
             if updated is not None:
+                self._live_book.upsert(updated)
                 self._emitter.emit(
                     "sportEvent:updated",
                     SportEventUpdatedEvent(sport_event=updated, received_at=received_at),
@@ -393,8 +456,25 @@ def create_client(
 ) -> Client:
     """Construct a realtimeodds Client.
 
-    Call `await client.connect()` to open the WebSocket. Subscribe to events
-    via `client.on(...)`. The client auto-reconnects with exponential backoff
-    on transient drops; configure or disable via `reconnect`.
+    Call ``await client.connect()`` to open the WebSocket. Subscribe to events
+    via ``client.on(...)``. The client auto-reconnects with exponential backoff
+    on transient drops; configure or disable via ``reconnect``.
     """
     return Client(url=url, api_key=api_key, reconnect=reconnect)
+
+
+__all__ = (
+    "Client",
+    "ConnectionState",
+    "ConnectionStatus",
+    "DisconnectedEvent",
+    "ErrorEvent",
+    "OddsChangedEvent",
+    "ReconnectingEvent",
+    "ResyncEvent",
+    "SourceClearedEvent",
+    "SportEventAddedEvent",
+    "SportEventRemovedEvent",
+    "SportEventUpdatedEvent",
+    "create_client",
+)
