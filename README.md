@@ -4,7 +4,7 @@ Real-time betting odds SDK for Python — multi-bookmaker, sport-discriminated, 
 
 The SDK is a **strict replica** of the gateway's internal stores: same shapes, same fields, same getters and read-side methods (transposed to Pythonic `snake_case`). Only the mutation surface (`_with_*`) is intentionally underscore-prefixed.
 
-> Status: 0.1.0 — early. The shapes documented here are intended to remain stable through the 0.x line.
+> Status: 0.3.0 — alpha. The shapes documented here are intended to remain stable through the 0.x line.
 
 ## Install
 
@@ -27,14 +27,15 @@ async def main() -> None:
         api_key="your-api-key",
     )
 
-    def on_added(ev):
-        if ev.sport_event.sport == "basketball":
-            print(f"{ev.sport_event.name} ({ev.sport_event.bookmaker})")
-
     def on_odds(ev):
-        print(f"{ev.bookmaker} {ev.selection_id} → {ev.quote.price}")
+        ctx = client.odds.find_context(ev.selection_id)
+        if ctx is None or ctx.sport_event.kind != "se:basketball_match":
+            return
+        print(
+            f"[{ev.bookmaker}] {ctx.sport_event.name} · "
+            f"{ctx.market.kind} · {ctx.selection.result} → {ev.quote.price}"
+        )
 
-    client.on("sportEvent:added", on_added)
     client.on("odds:changed", on_odds)
 
     await client.connect()
@@ -53,11 +54,27 @@ asyncio.run(main())
 |---|---|
 | `create_client(url, api_key, reconnect=None)` | Construct a client. |
 | `await client.connect()` | Open the WebSocket. Resolves on first successful connection; raises on invalid api_key, incompatible protocol, or exhausted reconnect attempts. Concurrent calls return the same future. |
-| `await client.disconnect()` | Close and stop reconnecting. Idempotent. Raises any in-flight `connect()`. |
-| `client.snapshot()` | Returns `Snapshot(sport_events: Mapping[SportEventId, SportEvent], stale: bool)`. |
-| `client.get_sport_event(id)` | Single lookup by id. Returns `None` if unknown. |
+| `await client.disconnect()` | Close and stop reconnecting. Idempotent. Raises any in-flight `connect()`. The live `OddsBook` is emptied immediately. |
+| `client.odds` | Live `OddsBook` — same instance every read, mutated in place as wire messages arrive. |
+| `client.snapshot()` | Frozen clone of the live book taken at the moment of the call. Use when you need a stable view across multiple reads. |
+| `client.get_sport_event(id)` | O(1) single lookup. Returns `None` if unknown. Convenience shortcut for `client.odds.get_sport_event(id)`. |
 | `client.on(event, cb)` / `client.off(event, cb)` | Subscribe / unsubscribe. Synchronous callbacks. |
 | `client.connection_state` | `ConnectionState(status, last_error)`. Use lifecycle events for reactive flows. |
+
+### `OddsBook`
+
+Read-only view of every sport event the SDK knows about, across every bookmaker. All lookups are O(1) thanks to maintained inverse indexes.
+
+```python
+client.odds.size                              # number of sport events
+client.odds.get_sport_event(sport_event_id)   # SportEvent | None
+client.odds.get_market(market_id)             # Market | None
+client.odds.get_selection(selection_id)       # Selection | None
+client.odds.find_context(selection_id)        # OddsContext | None
+list(client.odds)                             # iterate every event
+```
+
+`find_context` returns an `OddsContext(sport_event, market, selection)` in one O(1) lookup — recommended inside an `odds:changed` handler when you need more than just the price.
 
 ### Events
 
@@ -66,15 +83,17 @@ Synchronous callbacks. Each event payload is a frozen dataclass.
 | Event | Payload |
 |---|---|
 | `connected` | `None` |
-| `disconnected` | `DisconnectedEvent(will_reconnect, code, reason)` |
+| `disconnected` | `DisconnectedEvent(will_reconnect, code, reason)` — the live `OddsBook` is emptied before this fires. |
 | `reconnecting` | `ReconnectingEvent(attempt, delay_ms)` |
 | `error` | `ErrorEvent(message, fatal)` |
 | `sportEvent:added` | `SportEventAddedEvent(sport_event, received_at)` |
 | `sportEvent:updated` | `SportEventUpdatedEvent(sport_event, received_at)` — fires on metadata change OR on any odds change |
 | `sportEvent:removed` | `SportEventRemovedEvent(bookmaker, sport_event_id, received_at)` |
 | `odds:changed` | `OddsChangedEvent(bookmaker, sport_event_id, market_id, selection_id, quote, received_at)` |
+| `source:cleared` | `SourceClearedEvent(bookmaker, received_at)` — an entire bookmaker source went away. The SDK has already purged its events from the live book before this fires. |
+| `resync` | `ResyncEvent(bookmaker, reason, sport_events, received_at)` — atomic full-state replacement for one bookmaker. The live book has already swapped the affected slice before this fires. |
 
-`code` 4001/4002/4003 are fatal auth close codes; `fatal=True` errors stop the client.
+Close codes 4001/4002/4003 are fatal auth close codes; `fatal=True` errors stop the client.
 
 ## Entities
 
@@ -110,7 +129,7 @@ Every `SportEvent` carries a `bookmaker` property (derived from its `id`). The s
 
 ```python
 ps3838_events = [
-    ev for ev in client.snapshot().sport_events.values()
+    ev for ev in client.odds
     if ev.bookmaker == "ps3838"
 ]
 ```
@@ -148,7 +167,7 @@ client.on("error", on_error)
 
 ## Stability
 
-This is `0.1.0`. The shapes documented above are intended to remain stable through the `0.x` line. Breaking changes will require a `0.x → 0.(x+1)` minor bump. Pre-1.0 means we may still iterate on edge-case behaviour and undocumented internals.
+This is `0.3.0`. The shapes documented above are intended to remain stable through the `0.x` line. Breaking changes will require a `0.x → 0.(x+1)` minor bump. Pre-1.0 means we may still iterate on edge-case behaviour and undocumented internals.
 
 See [`realtimeodds-spec`](https://github.com/Lisandru-2b/realtimeodds-spec) for the wire-format JSON Schemas (used by cross-language ports for protocol-level validation).
 
