@@ -130,7 +130,13 @@ class GatewayClient:
 
     async def _open_socket(self) -> None:
         try:
-            self._ws = await ws_connect(self._url)
+            # `max_size` lifted from the websockets default of 1 MiB. The
+            # initial `snapshot` frame can grow well past that for active
+            # books (a single bookmaker covering NBA + several leagues
+            # easily exceeds 1 MiB once player props ship). 16 MiB is the
+            # safety ceiling; anything larger crosses into "your snapshot is
+            # too big, paginate it" territory rather than "raise the limit".
+            self._ws = await ws_connect(self._url, max_size=16 * 1024 * 1024)
         except Exception as err:
             self.events.emit("error", err)
             await self._on_close(code=0, reason=str(err))
