@@ -84,12 +84,23 @@ class SportEvent:
     # ─── Lookups ────────────────────────────────────────────────────────────
 
     def get_market(self, entity_id: MarketId | SelectionId | str) -> Market | None:
-        """Lookup by MarketId or SelectionId (truncated to MarketId)."""
-        try:
-            market_id = get_market_id(entity_id)
-        except ValueError:
+        """Lookup by MarketId or SelectionId.
+
+        Tries a direct lookup first (input is a MarketId), then falls back to
+        stripping the trailing selection segment. This is robust to MarketIds
+        whose `external_market_id` part contains internal `:` separators.
+        """
+        from typing import cast
+
+        # Direct: the caller passed a MarketId.
+        direct = self.markets.get(cast(MarketId, entity_id))
+        if direct is not None:
+            return direct
+        # Fall back: assume the input is a SelectionId — drop the last segment.
+        last_colon = entity_id.rfind(":")
+        if last_colon == -1:
             return None
-        return self.markets.get(market_id)
+        return self.markets.get(cast(MarketId, entity_id[:last_colon]))
 
     def get_selection(self, selection_id: SelectionId) -> Selection | None:
         market = self.get_market(selection_id)

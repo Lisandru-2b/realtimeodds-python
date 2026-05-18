@@ -29,11 +29,21 @@ def get_sport_event_id(entity_id: str) -> SportEventId:
 
 
 def get_market_id(entity_id: str) -> MarketId:
-    """Truncate any MarketId or SelectionId to the MarketId prefix."""
+    """Resolve any MarketId or SelectionId to the MarketId.
+
+    The grammar reserves `:` as the top-level segment separator. Producers
+    SHOULD avoid `:` inside `external_market_id` / `external_selection_id`
+    (use `_` instead). This helper tolerates inputs where a producer still
+    embedded `:` internally: with 5+ segments we assume the input is a
+    SelectionId and strip its trailing segment; with fewer it is taken
+    verbatim (already a MarketId).
+    """
     parts = entity_id.split(":")
     if len(parts) < 4:
         raise ValueError(f"Cannot extract MarketId from {entity_id!r}")
-    return MarketId(":".join(parts[:4]))
+    if len(parts) < 5:
+        return MarketId(entity_id)
+    return MarketId(":".join(parts[:-1]))
 
 
 def make_sport_event_id(bookmaker: Bookmaker, external_id: str) -> SportEventId:
