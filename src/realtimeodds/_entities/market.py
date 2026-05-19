@@ -14,7 +14,6 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
-from .._id_helper import get_bookmaker
 from .._types import (
     SPORT_OF_SPORT_EVENT_NAMES,
     BasketballPeriod,
@@ -28,6 +27,7 @@ from .._types import (
     SelectionResult,
     Sport,
 )
+from ..id_helper import get_bookmaker
 from .selection import Selection
 
 

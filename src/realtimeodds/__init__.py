@@ -66,8 +66,9 @@ from .client import (
     SportEventUpdatedEvent,
     create_client,
 )
+from .id_helper import IdHelper
 
-__version__ = "0.2.0"
+__version__ = "0.3.1"
 
 __all__ = [
     # Client surface
@@ -76,6 +77,7 @@ __all__ = [
     "ConnectionStatus",
     "DisconnectedEvent",
     "ErrorEvent",
+    "IdHelper",
     "OddsBook",
     "OddsChangedEvent",
     "OddsContext",

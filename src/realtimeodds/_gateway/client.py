@@ -46,10 +46,6 @@ class GatewayClient:
       - `source:added` ((source_id, store))
       - `source:cleared` (source_id)
       - `source:resynced` ((source_id, reason, store))
-      - `preset_list` (presets) — admin only, fires on token-auth connections
-      - `preset:updated` (preset) — admin only
-      - `preset:removed` (preset_id) — admin only
-      - `fetcher:status` (preset) — admin only
     """
 
     __slots__ = (
@@ -57,7 +53,6 @@ class GatewayClient:
         "_handshake_done",
         "_open_task",
         "_pending_close_tasks",
-        "_presets",
         "_reconnect",
         "_reconnect_task",
         "_recv_task",
@@ -80,7 +75,6 @@ class GatewayClient:
         self._pending_close_tasks: list[asyncio.Task[None]] = []
         self._attempt = 0
         self._stores: dict[str, OddsStore] = {}
-        self._presets: list[dict[str, Any]] = []
         self.events = TypedEmitter()
 
     # ─── Lifecycle ──────────────────────────────────────────────────────────
@@ -122,9 +116,6 @@ class GatewayClient:
             self._stores[source] = store
             self.events.emit("source:added", (source, store))
         return store
-
-    def get_presets(self) -> list[dict[str, Any]]:
-        return list(self._presets)
 
     # ─── Internals ──────────────────────────────────────────────────────────
 
@@ -257,10 +248,6 @@ class GatewayClient:
                 store = self.get_or_create_store(source)
                 store.upsert_sport_event(sport_event_from_json(payload))
             return
-        if msg_type == "preset_list":
-            self._presets = list(msg.get("data", []))
-            self.events.emit("preset_list", self._presets)
-            return
         if msg_type in ("new_event", "update_event"):
             source = msg.get("source")
             if source is None:
@@ -306,21 +293,6 @@ class GatewayClient:
             events = [sport_event_from_json(raw) for raw in msg.get("data", [])]
             store.replace_with_snapshot(events)
             self.events.emit("source:resynced", (source, reason, store))
-            return
-        if msg_type == "fetcher_status":
-            self.events.emit("fetcher:status", msg.get("data"))
-            return
-        if msg_type == "preset_updated":
-            data = msg.get("data", {})
-            self._presets = [p for p in self._presets if p.get("id") != data.get("id")]
-            self._presets.append(data)
-            self.events.emit("preset:updated", data)
-            return
-        if msg_type == "preset_removed":
-            data = msg.get("data", {})
-            preset_id = data.get("id")
-            self._presets = [p for p in self._presets if p.get("id") != preset_id]
-            self.events.emit("preset:removed", preset_id)
             return
         if msg_type == "hello":
             # Unexpected post-handshake hello — ignore silently.

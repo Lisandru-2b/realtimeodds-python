@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "realtimeodds"
-version = "0.3.0"
+version = "0.3.1"
 description = "Real-time betting odds SDK — multi-bookmaker, sport-discriminated, asyncio."
 readme = "README.md"
 license = { file = "LICENSE" }

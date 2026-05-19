@@ -14,7 +14,6 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any
 
-from .._id_helper import get_bookmaker, get_market_id
 from .._types import (
     SPORT_OF_SPORT_EVENT_NAMES,
     Bookmaker,
@@ -24,6 +23,7 @@ from .._types import (
     SportEventId,
     SportEventKind,
 )
+from ..id_helper import get_bookmaker, get_market_id
 from .market import Market, market_from_json
 from .selection import Selection
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .._id_helper import get_bookmaker
 from .._types import (
     SELECTION_RESULT_ASSOCIATIONS,
     Bookmaker,
@@ -13,6 +12,7 @@ from .._types import (
     SelectionKind,
     SelectionResult,
 )
+from ..id_helper import get_bookmaker
 from .order_book import OrderBook
 from .quote import Quote
 
