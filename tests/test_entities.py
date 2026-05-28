@@ -15,6 +15,7 @@ from realtimeodds import (
     Selection,
     SelectionId,
     SportEventId,
+    UnknownMarket,
 )
 from realtimeodds._entities import market_from_json, sport_event_from_json
 
@@ -266,6 +267,12 @@ def test_sport_event_from_json_basketball() -> None:
     assert market.is_fully_available
 
 
-def test_market_from_json_unknown_kind_raises() -> None:
+def test_market_from_json_unknown_kind_is_tolerated_by_default() -> None:
+    market = market_from_json({"kind": "market:nonexistent", "id": "x", "selectionKind": "home/away", "isSynthetic": False, "selections": []})
+    assert isinstance(market, UnknownMarket)
+    assert market.kind == "market:nonexistent"
+
+
+def test_market_from_json_unknown_kind_raises_in_strict_mode() -> None:
     with pytest.raises(ValueError):
-        market_from_json({"kind": "market:nonexistent", "id": "x", "selectionKind": "home/away", "isSynthetic": False, "selections": []})
+        market_from_json({"kind": "market:nonexistent", "id": "x", "selectionKind": "home/away", "isSynthetic": False, "selections": []}, strict=True)

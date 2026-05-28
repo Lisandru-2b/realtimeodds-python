@@ -28,7 +28,7 @@ class OddsStore:
     def __init__(self) -> None:
         self._emitter = TypedEmitter()
         self._sport_events: dict[SportEventId, SportEvent] = {}
-        self._by_kind: dict[SportEventKind, dict[SportEventId, SportEvent]] = {}
+        self._by_kind: dict[str, dict[SportEventId, SportEvent]] = {}
 
     # ─── Events ─────────────────────────────────────────────────────────────
 
@@ -119,7 +119,7 @@ class OddsStore:
     def get_all_sport_events(self) -> Mapping[SportEventId, SportEvent]:
         return MappingProxyType(self._sport_events)
 
-    def get_sport_events_by_kind(self, kind: SportEventKind) -> Mapping[SportEventId, SportEvent]:
+    def get_sport_events_by_kind(self, kind: SportEventKind | str) -> Mapping[SportEventId, SportEvent]:
         return MappingProxyType(self._by_kind.get(kind, {}))
 
     @property

@@ -1,11 +1,4 @@
-"""Market — a betting market within a sport event.
-
-Discriminated union over `kind`. Six variants in v1:
-  - BasketballMoneyline / BasketballHandicap / BasketballTotal /
-    BasketballPlayerPropOverUnder
-  - FootballMoneyline
-  - TennisMoneyline
-"""
+"""Market entities and JSON deserialization."""
 
 from __future__ import annotations
 
@@ -26,6 +19,8 @@ from .._types import (
     SelectionKind,
     SelectionResult,
     Sport,
+    TennisTotalScope,
+    TennisUnit,
 )
 from ..id_helper import get_bookmaker
 from .selection import Selection
@@ -34,7 +29,6 @@ from .selection import Selection
 def _wrap_selections(
     selections: Mapping[SelectionId, Selection] | Iterable[Selection],
 ) -> Mapping[SelectionId, Selection]:
-    """Build a read-only `MappingProxyType` keyed by selection id."""
     if isinstance(selections, Mapping):
         d = dict(selections)
     else:
@@ -42,42 +36,48 @@ def _wrap_selections(
     return MappingProxyType(d)
 
 
-_BASKETBALL_PERIOD_LABELS: dict[BasketballPeriod, str] = {
+def _freeze_mapping(data: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    return MappingProxyType(dict(data or {}))
+
+
+_PERIOD_LABELS: dict[str, str] = {
     "full_match": "",
-    "1st_half": " (1ère mi-temps)",
-    "2nd_half": " (2ème mi-temps)",
+    "1st_half": " (1ere mi-temps)",
+    "2nd_half": " (2eme mi-temps)",
     "1st_quarter": " (1er quart-temps)",
-    "2nd_quarter": " (2ème quart-temps)",
-    "3rd_quarter": " (3ème quart-temps)",
-    "4th_quarter": " (4ème quart-temps)",
+    "2nd_quarter": " (2eme quart-temps)",
+    "3rd_quarter": " (3eme quart-temps)",
+    "4th_quarter": " (4eme quart-temps)",
+    "1st_period": " (1ere periode)",
+    "2nd_period": " (2eme periode)",
+    "3rd_period": " (3eme periode)",
+    "1st_set": " (1er set)",
+    "2nd_set": " (2eme set)",
+    "3rd_set": " (3eme set)",
+    "4th_set": " (4eme set)",
+    "5th_set": " (5eme set)",
+    "1st_inning": " (1ere manche)",
     "overtime": " (prolongation)",
 }
+
+
+def _period_label(period: str | None) -> str:
+    return _PERIOD_LABELS.get(period or "full_match", "")
 
 
 def _format_handicap(value: float) -> str:
     return f"+{value}" if value > 0 else str(value)
 
 
-# ─── Base ──────────────────────────────────────────────────────────────────
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Market:
-    """Abstract base for all market variants. All fields are read-only.
-
-    Consumers should branch on ``market.kind`` to access subtype-specific
-    fields (e.g. ``BasketballHandicap.handicap``). Static type checkers can
-    narrow via ``isinstance`` or by comparing ``kind`` to a literal.
-    """
-
     id: MarketId
-    kind: MarketKind
+    kind: str
     selection_kind: SelectionKind
     is_synthetic: bool
     selections: Mapping[SelectionId, Selection] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        # Normalize to a frozen mapping, then validate uniqueness/coherence.
         wrapped = _wrap_selections(self.selections)
         object.__setattr__(self, "selections", wrapped)
 
@@ -85,16 +85,11 @@ class Market:
         for sel in self.selections.values():
             if sel.kind != self.selection_kind:
                 raise ValueError(
-                    f"Selection kind {sel.kind!r} is not compatible with "
-                    f"market kind {self.kind!r}"
+                    f"Selection kind {sel.kind!r} is not compatible with market kind {self.kind!r}"
                 )
             if sel.result in seen_results:
-                raise ValueError(
-                    f"Selection result {sel.result!r} appears multiple times"
-                )
+                raise ValueError(f"Selection result {sel.result!r} appears multiple times")
             seen_results.add(sel.result)
-
-    # ─── Computed properties ────────────────────────────────────────────────
 
     @property
     def bookmaker(self) -> Bookmaker:
@@ -102,12 +97,11 @@ class Market:
 
     @property
     def market_name(self) -> str:
-        # `market:<sport_event_name>.<market_name>` -> `<market_name>`
-        return self.kind.split(":")[1].split(".")[1]
+        return self.kind.split(":")[1].split(".")[1] if ":" in self.kind and "." in self.kind else self.kind
 
     @property
     def sport_event_name(self) -> str:
-        return self.kind.split(":")[1].split(".")[0]
+        return self.kind.split(":")[1].split(".")[0] if ":" in self.kind and "." in self.kind else "unknown"
 
     @property
     def sport(self) -> Sport:
@@ -119,9 +113,7 @@ class Market:
 
     @property
     def is_fully_available(self) -> bool:
-        if not self.are_all_selections_present:
-            return False
-        return all(s.is_available for s in self.selections.values())
+        return self.are_all_selections_present and all(s.is_available for s in self.selections.values())
 
     @property
     def are_all_selections_present(self) -> bool:
@@ -133,10 +125,7 @@ class Market:
 
     @property
     def category(self) -> str:
-        """Subclass-overridable human-readable category. Default falls back to `market_name`."""
         return self.market_name
-
-    # ─── Lookups ────────────────────────────────────────────────────────────
 
     def get_selection(self, selection_id: SelectionId) -> Selection | None:
         return self.selections.get(selection_id)
@@ -158,31 +147,23 @@ class Market:
         sel = self.get_selection_by_result(result)
         return bool(sel and sel.is_available)
 
-    # ─── Margin / fair odds ─────────────────────────────────────────────────
-
     def calculate_margin(self) -> float:
-        """Sum of implied probabilities minus 1. Raises if the market is not fully available."""
         if not self.is_fully_available:
             raise RuntimeError("All selections are not available")
         margin = 0.0
         for sel in self.selections.values():
-            assert sel.quote is not None  # guaranteed by is_fully_available
+            assert sel.quote is not None
             margin += sel.quote.implied_probability
         return margin - 1.0
 
     def is_fair_odd_available(self, result: SelectionResult) -> bool:
-        if self.is_synthetic:
-            return self.is_selection_available(result)
-        return self.is_fully_available
+        return self.is_selection_available(result) if self.is_synthetic else self.is_fully_available
 
     def get_fair_odd(self, result: SelectionResult) -> float:
-        """Margin-adjusted "true" odd for `result`. Synthetic markets bypass the margin computation."""
         if self.is_synthetic:
             sel = self.get_selection_by_result(result)
             if sel is None or not sel.is_available:
-                raise RuntimeError(
-                    f"Synthetic market {self.id} cannot compute fair odd for {result!r}"
-                )
+                raise RuntimeError(f"Synthetic market {self.id} cannot compute fair odd for {result!r}")
             return sel.price
         if not self.is_fully_available:
             raise RuntimeError(f"Market {self.id} is not fully available")
@@ -204,13 +185,9 @@ class Market:
         return False
 
     def get_selection_name(self, result: SelectionResult) -> str:
-        """Default fallback. Subclasses override with sport-specific human-readable strings."""
         return result
 
-    # ─── Internal mutators (return new instance) ────────────────────────────
-
     def _with_selections(self, new_selections: Iterable[Selection]) -> Market:
-        """Subclass-aware clone with replaced selections. Override per subclass."""
         return replace(self, selections=_wrap_selections(new_selections))
 
     def _with_updated_selection(self, sel_to_update: Selection) -> Market:
@@ -243,33 +220,45 @@ class Market:
         return self._with_updated_selection(sel._with_unavailability())
 
 
-# ─── Subclasses ─────────────────────────────────────────────────────────────
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UnknownMarket(Market):
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        Market.__post_init__(self)
+        object.__setattr__(self, "raw", _freeze_mapping(self.raw))
+
+    @property
+    def category(self) -> str:
+        return "unknown"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class BasketballMoneyline(Market):
+class HomeAwayMoneyline(Market):
     home_team: str
     away_team: str
-    period: BasketballPeriod = "full_match"
+    period: str = "full_match"
 
     @property
     def category(self) -> str:
         return "Moneyline"
 
     def get_selection_name(self, result: SelectionResult) -> str:
-        suffix = _BASKETBALL_PERIOD_LABELS[self.period]
+        suffix = _period_label(self.period)
         if result == "home":
             return f"{self.home_team} vainqueur{suffix}"
         if result == "away":
             return f"{self.away_team} vainqueur{suffix}"
+        if result == "draw":
+            return "Match nul"
         raise ValueError(f"Invalid selection result: {result}")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class BasketballHandicap(Market):
+class HomeAwayHandicap(Market):
     home_team: str
     away_team: str
-    period: BasketballPeriod
+    period: str
     handicap: float
 
     @property
@@ -277,7 +266,7 @@ class BasketballHandicap(Market):
         return "Handicap"
 
     def get_selection_name(self, result: SelectionResult) -> str:
-        suffix = _BASKETBALL_PERIOD_LABELS[self.period]
+        suffix = _period_label(self.period)
         if result == "home":
             return f"{self.home_team} {_format_handicap(self.handicap)}{suffix}"
         if result == "away":
@@ -286,10 +275,10 @@ class BasketballHandicap(Market):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class BasketballTotal(Market):
+class HomeAwayTotal(Market):
     home_team: str
     away_team: str
-    period: BasketballPeriod
+    period: str
     scope: BasketballTotalScope
     cut: float
 
@@ -299,17 +288,121 @@ class BasketballTotal(Market):
 
     def _scope_subject(self) -> str:
         if self.scope == "match":
-            return "Total combiné"
+            return "Total combine"
         if self.scope == "home":
             return self.home_team
         return self.away_team
 
     def get_selection_name(self, result: SelectionResult) -> str:
-        suffix = _BASKETBALL_PERIOD_LABELS[self.period]
+        suffix = _period_label(self.period)
         if result not in ("over", "under"):
             raise ValueError(f"Invalid selection result: {result}")
         verb = "plus de" if result == "over" else "moins de"
-        return f"{self._scope_subject()} : {verb} {self.cut} points{suffix}"
+        return f"{self._scope_subject()} : {verb} {self.cut}{suffix}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CompetitorMoneyline(Market):
+    competitor1: str
+    competitor2: str
+    period: str = "full_match"
+
+    @property
+    def category(self) -> str:
+        return "Moneyline"
+
+    def get_selection_name(self, result: SelectionResult) -> str:
+        suffix = _period_label(self.period)
+        if result == "competitor1":
+            return f"{self.competitor1} vainqueur{suffix}"
+        if result == "competitor2":
+            return f"{self.competitor2} vainqueur{suffix}"
+        raise ValueError(f"Invalid selection result: {result}")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CompetitorHandicap(Market):
+    competitor1: str
+    competitor2: str
+    period: str
+    unit: TennisUnit
+    handicap: float
+
+    @property
+    def category(self) -> str:
+        return "Handicap"
+
+    def get_selection_name(self, result: SelectionResult) -> str:
+        suffix = _period_label(self.period)
+        if result == "competitor1":
+            return f"{self.competitor1} {_format_handicap(self.handicap)} {self.unit}{suffix}"
+        if result == "competitor2":
+            return f"{self.competitor2} {_format_handicap(-self.handicap)} {self.unit}{suffix}"
+        raise ValueError(f"Invalid selection result: {result}")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CompetitorTotal(Market):
+    competitor1: str
+    competitor2: str
+    period: str
+    scope: TennisTotalScope
+    unit: TennisUnit
+    cut: float
+
+    @property
+    def category(self) -> str:
+        return "Total"
+
+    def _scope_subject(self) -> str:
+        if self.scope == "match":
+            return "Total combine"
+        if self.scope == "competitor1":
+            return self.competitor1
+        return self.competitor2
+
+    def get_selection_name(self, result: SelectionResult) -> str:
+        suffix = _period_label(self.period)
+        if result not in ("over", "under"):
+            raise ValueError(f"Invalid selection result: {result}")
+        verb = "plus de" if result == "over" else "moins de"
+        return f"{self._scope_subject()} : {verb} {self.cut} {self.unit}{suffix}"
+
+
+class AmericanFootballMoneyline(HomeAwayMoneyline):
+    pass
+
+
+class AmericanFootballHandicap(HomeAwayHandicap):
+    pass
+
+
+class AmericanFootballTotal(HomeAwayTotal):
+    pass
+
+
+class BaseballMoneyline(HomeAwayMoneyline):
+    pass
+
+
+class BaseballHandicap(HomeAwayHandicap):
+    pass
+
+
+class BaseballTotal(HomeAwayTotal):
+    pass
+
+
+class BasketballMoneyline(HomeAwayMoneyline):
+    period: BasketballPeriod = "full_match"
+
+
+class BasketballHandicap(HomeAwayHandicap):
+    pass
+
+
+class BasketballTotal(HomeAwayTotal):
+    pass
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -325,78 +418,124 @@ class BasketballPlayerPropOverUnder(Market):
     def get_selection_name(self, result: SelectionResult) -> str:
         if result not in ("over", "under"):
             raise ValueError(f"Invalid selection result: {result}")
-        verbs: dict[PlayerPropType, str] = {
-            "points": "marque",
-            "rebounds": "effectue",
-            "assists": "fait",
-            "threes": "marque",
-            "steals": "fait",
-            "blocks": "fait",
-            "points_rebounds": "effectue",
-            "points_assists": "effectue",
-            "rebounds_assists": "effectue",
-            "points_rebounds_assists": "effectue",
-            "other": "effectue",
-        }
-        types: dict[PlayerPropType, str] = {
-            "points": "points",
-            "rebounds": "rebonds",
-            "assists": "passes décisives",
-            "threes": "tirs à trois points",
-            "steals": "interceptions",
-            "blocks": "contres",
-            "points_rebounds": "points + rebonds",
-            "points_assists": "points + passes décisives",
-            "rebounds_assists": "rebonds + passes décisives",
-            "points_rebounds_assists": "points + rebonds + passes décisives",
-            "other": "autre",
-        }
         comparator = "plus de" if result == "over" else "moins de"
-        return f"{self.player_name} {verbs[self.prop_type]} {comparator} {self.cut} {types[self.prop_type]}"
+        return f"{self.player_name} {comparator} {self.cut} {self.prop_type}"
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class FootballMoneyline(Market):
-    home_team: str
-    away_team: str
-
-    @property
-    def category(self) -> str:
-        return "Moneyline"
-
-    def get_selection_name(self, result: SelectionResult) -> str:
-        if result == "home":
-            return f"{self.home_team} vainqueur"
-        if result == "away":
-            return f"{self.away_team} vainqueur"
-        if result == "draw":
-            return "Match nul"
-        raise ValueError(f"Invalid selection result: {result}")
+class BoxingMoneyline(CompetitorMoneyline):
+    pass
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class TennisMoneyline(Market):
-    competitor1: str
-    competitor2: str
-
-    @property
-    def category(self) -> str:
-        return "Moneyline"
-
-    def get_selection_name(self, result: SelectionResult) -> str:
-        if result == "competitor1":
-            return f"{self.competitor1} vainqueur"
-        if result == "competitor2":
-            return f"{self.competitor2} vainqueur"
-        raise ValueError(f"Invalid selection result: {result}")
+class CricketMoneyline(HomeAwayMoneyline):
+    pass
 
 
-# ─── JSON deserialization ──────────────────────────────────────────────────
+class FootballMoneyline(HomeAwayMoneyline):
+    pass
 
 
-def market_from_json(data: dict[str, Any]) -> Market:
-    """Build the right Market subclass from its wire JSON. Mirrors `Market.fromJSON` in JS."""
-    kind: MarketKind = data["kind"]
+class FootballHandicap(HomeAwayHandicap):
+    pass
+
+
+class FootballTotal(HomeAwayTotal):
+    pass
+
+
+class HandballMoneyline(HomeAwayMoneyline):
+    pass
+
+
+class HandballHandicap(HomeAwayHandicap):
+    pass
+
+
+class HandballTotal(HomeAwayTotal):
+    pass
+
+
+class HockeyMoneyline(HomeAwayMoneyline):
+    pass
+
+
+class HockeyRegulationMoneyline(HomeAwayMoneyline):
+    pass
+
+
+class HockeyHandicap(HomeAwayHandicap):
+    pass
+
+
+class HockeyTotal(HomeAwayTotal):
+    pass
+
+
+class MmaMoneyline(CompetitorMoneyline):
+    pass
+
+
+class RugbyLeagueMoneyline(HomeAwayMoneyline):
+    pass
+
+
+class RugbyLeagueHandicap(HomeAwayHandicap):
+    pass
+
+
+class RugbyLeagueTotal(HomeAwayTotal):
+    pass
+
+
+class TennisMoneyline(CompetitorMoneyline):
+    pass
+
+
+class TennisHandicap(CompetitorHandicap):
+    pass
+
+
+class TennisTotal(CompetitorTotal):
+    pass
+
+
+_HOME_AWAY_MONEYLINE: dict[str, type[HomeAwayMoneyline]] = {
+    "market:american_football_match.moneyline": AmericanFootballMoneyline,
+    "market:baseball_match.moneyline": BaseballMoneyline,
+    "market:basketball_match.moneyline": BasketballMoneyline,
+    "market:cricket_match.moneyline": CricketMoneyline,
+    "market:football_match.moneyline": FootballMoneyline,
+    "market:handball_match.moneyline": HandballMoneyline,
+    "market:hockey_match.moneyline": HockeyMoneyline,
+    "market:hockey_match.regulation_moneyline": HockeyRegulationMoneyline,
+    "market:rugby_league_match.moneyline": RugbyLeagueMoneyline,
+}
+_HOME_AWAY_HANDICAP: dict[str, type[HomeAwayHandicap]] = {
+    "market:american_football_match.handicap": AmericanFootballHandicap,
+    "market:baseball_match.handicap": BaseballHandicap,
+    "market:basketball_match.handicap": BasketballHandicap,
+    "market:football_match.handicap": FootballHandicap,
+    "market:handball_match.handicap": HandballHandicap,
+    "market:hockey_match.handicap": HockeyHandicap,
+    "market:rugby_league_match.handicap": RugbyLeagueHandicap,
+}
+_HOME_AWAY_TOTAL: dict[str, type[HomeAwayTotal]] = {
+    "market:american_football_match.total": AmericanFootballTotal,
+    "market:baseball_match.total": BaseballTotal,
+    "market:basketball_match.total": BasketballTotal,
+    "market:football_match.total": FootballTotal,
+    "market:handball_match.total": HandballTotal,
+    "market:hockey_match.total": HockeyTotal,
+    "market:rugby_league_match.total": RugbyLeagueTotal,
+}
+_COMPETITOR_MONEYLINE: dict[str, type[CompetitorMoneyline]] = {
+    "market:boxing_fight.moneyline": BoxingMoneyline,
+    "market:mma_fight.moneyline": MmaMoneyline,
+    "market:tennis_match.moneyline": TennisMoneyline,
+}
+
+
+def market_from_json(data: dict[str, Any], *, strict: bool = False) -> Market:
+    kind = str(data["kind"])
     selections = tuple(Selection._from_json(s) for s in data.get("selections", []))
     common_kwargs: dict[str, Any] = {
         "id": MarketId(str(data["id"])),
@@ -405,27 +544,30 @@ def market_from_json(data: dict[str, Any]) -> Market:
         "is_synthetic": bool(data.get("isSynthetic", False)),
         "selections": selections,
     }
-    if kind == "market:basketball_match.moneyline":
-        return BasketballMoneyline(
+    if kind in _HOME_AWAY_MONEYLINE:
+        moneyline_cls = _HOME_AWAY_MONEYLINE[kind]
+        return moneyline_cls(
             **common_kwargs,
             home_team=data["homeTeam"],
             away_team=data["awayTeam"],
             period=data.get("period", "full_match"),
         )
-    if kind == "market:basketball_match.handicap":
-        return BasketballHandicap(
+    if kind in _HOME_AWAY_HANDICAP:
+        handicap_cls = _HOME_AWAY_HANDICAP[kind]
+        return handicap_cls(
             **common_kwargs,
             home_team=data["homeTeam"],
             away_team=data["awayTeam"],
-            period=data["period"],
+            period=data.get("period", "full_match"),
             handicap=float(data["handicap"]),
         )
-    if kind == "market:basketball_match.total":
-        return BasketballTotal(
+    if kind in _HOME_AWAY_TOTAL:
+        total_cls = _HOME_AWAY_TOTAL[kind]
+        return total_cls(
             **common_kwargs,
             home_team=data["homeTeam"],
             away_team=data["awayTeam"],
-            period=data["period"],
+            period=data.get("period", "full_match"),
             scope=data["scope"],
             cut=float(data["cut"]),
         )
@@ -436,16 +578,33 @@ def market_from_json(data: dict[str, Any]) -> Market:
             prop_type=data["propType"],
             cut=float(data["cut"]),
         )
-    if kind == "market:football_match.moneyline":
-        return FootballMoneyline(
-            **common_kwargs,
-            home_team=data["homeTeam"],
-            away_team=data["awayTeam"],
-        )
-    if kind == "market:tennis_match.moneyline":
-        return TennisMoneyline(
+    if kind in _COMPETITOR_MONEYLINE:
+        competitor_cls = _COMPETITOR_MONEYLINE[kind]
+        return competitor_cls(
             **common_kwargs,
             competitor1=data["competitor1"],
             competitor2=data["competitor2"],
+            period=data.get("period", "full_match"),
         )
-    raise ValueError(f"Unknown market kind: {kind!r}")
+    if kind == "market:tennis_match.handicap":
+        return TennisHandicap(
+            **common_kwargs,
+            competitor1=data["competitor1"],
+            competitor2=data["competitor2"],
+            period=data.get("period", "full_match"),
+            unit=data["unit"],
+            handicap=float(data["handicap"]),
+        )
+    if kind == "market:tennis_match.total":
+        return TennisTotal(
+            **common_kwargs,
+            competitor1=data["competitor1"],
+            competitor2=data["competitor2"],
+            period=data.get("period", "full_match"),
+            scope=data["scope"],
+            unit=data["unit"],
+            cut=float(data["cut"]),
+        )
+    if strict:
+        raise ValueError(f"Unknown market kind: {kind!r}")
+    return UnknownMarket(**common_kwargs, raw=data)

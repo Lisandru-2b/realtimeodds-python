@@ -1,18 +1,12 @@
-"""SportEvent — a sport match reported by a bookmaker.
-
-Discriminated union over `kind`. Three variants in v1:
-  - BasketballMatch
-  - FootballMatch
-  - TennisMatch
-"""
+"""Sport event entities and JSON deserialization."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 from .._types import (
     SPORT_OF_SPORT_EVENT_NAMES,
@@ -21,7 +15,6 @@ from .._types import (
     SelectionId,
     Sport,
     SportEventId,
-    SportEventKind,
 )
 from ..id_helper import get_bookmaker, get_market_id
 from .market import Market, market_from_json
@@ -36,15 +29,14 @@ def _wrap_markets(markets: Mapping[MarketId, Market] | Iterable[Market]) -> Mapp
     return MappingProxyType(d)
 
 
-# ─── Base ──────────────────────────────────────────────────────────────────
+def _freeze_mapping(data: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    return MappingProxyType(dict(data or {}))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SportEvent:
-    """Abstract base for all sport event variants. All fields are read-only."""
-
     id: SportEventId
-    kind: SportEventKind
+    kind: str
     competition: str
     markets: Mapping[MarketId, Market] = field(default_factory=dict)
     sport_region: str | None = None
@@ -56,12 +48,10 @@ class SportEvent:
         object.__setattr__(self, "markets", wrapped)
 
         for market in self.markets.values():
-            if market.sport_event_name != self.sport_event_name:
+            if market.sport_event_name != self.sport_event_name and market.sport_event_name != "unknown":
                 raise ValueError(
                     f"Market kind {market.kind!r} is not compatible with sport event kind {self.kind!r}"
                 )
-
-    # ─── Computed properties ────────────────────────────────────────────────
 
     @property
     def bookmaker(self) -> Bookmaker:
@@ -69,8 +59,7 @@ class SportEvent:
 
     @property
     def sport_event_name(self) -> str:
-        # `se:<sport_event_name>` -> `<sport_event_name>`
-        return self.kind.split(":")[1]
+        return self.kind.split(":")[1] if ":" in self.kind else "unknown"
 
     @property
     def sport(self) -> Sport:
@@ -78,25 +67,12 @@ class SportEvent:
 
     @property
     def name(self) -> str:
-        """Human-readable match name. Subclasses override."""
-        return self.id  # fallback
-
-    # ─── Lookups ────────────────────────────────────────────────────────────
+        return self.id
 
     def get_market(self, entity_id: MarketId | SelectionId | str) -> Market | None:
-        """Lookup by MarketId or SelectionId.
-
-        Tries a direct lookup first (input is a MarketId), then falls back to
-        stripping the trailing selection segment. This is robust to MarketIds
-        whose `external_market_id` part contains internal `:` separators.
-        """
-        from typing import cast
-
-        # Direct: the caller passed a MarketId.
         direct = self.markets.get(cast(MarketId, entity_id))
         if direct is not None:
             return direct
-        # Fall back: assume the input is a SelectionId — drop the last segment.
         last_colon = entity_id.rfind(":")
         if last_colon == -1:
             return None
@@ -104,11 +80,7 @@ class SportEvent:
 
     def get_selection(self, selection_id: SelectionId) -> Selection | None:
         market = self.get_market(selection_id)
-        if market is None:
-            return None
-        return market.get_selection(selection_id)
-
-    # ─── Internal mutators ──────────────────────────────────────────────────
+        return None if market is None else market.get_selection(selection_id)
 
     def _with_updated_market(self, market_to_update: Market) -> SportEvent:
         if market_to_update.id not in self.markets:
@@ -127,19 +99,23 @@ class SportEvent:
         for sel_id in prices:
             if get_market_id(sel_id) != market.id:
                 raise RuntimeError("Selections are not all from the same market")
-        new_market = market._with_updated_prices(prices)
-        return self._with_updated_market(new_market)
+        return self._with_updated_market(market._with_updated_prices(prices))
 
     def _clone_with_markets(self, markets: Iterable[Market]) -> SportEvent:
-        """Override per subclass — returns the right concrete type with replaced markets."""
-        raise NotImplementedError
-
-
-# ─── Subclasses ─────────────────────────────────────────────────────────────
+        return replace(self, markets=_wrap_markets(markets))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class BasketballMatch(SportEvent):
+class UnknownSportEvent(SportEvent):
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        SportEvent.__post_init__(self)
+        object.__setattr__(self, "raw", _freeze_mapping(self.raw))
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HomeAwaySportEvent(SportEvent):
     home_team: str = ""
     away_team: str = ""
 
@@ -147,45 +123,9 @@ class BasketballMatch(SportEvent):
     def name(self) -> str:
         return f"{self.home_team} / {self.away_team}"
 
-    def _clone_with_markets(self, markets: Iterable[Market]) -> BasketballMatch:
-        return BasketballMatch(
-            id=self.id,
-            kind=self.kind,
-            competition=self.competition,
-            markets=_wrap_markets(markets),
-            sport_region=self.sport_region,
-            start_date=self.start_date,
-            match_url=self.match_url,
-            home_team=self.home_team,
-            away_team=self.away_team,
-        )
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class FootballMatch(SportEvent):
-    home_team: str = ""
-    away_team: str = ""
-
-    @property
-    def name(self) -> str:
-        return f"{self.home_team} / {self.away_team}"
-
-    def _clone_with_markets(self, markets: Iterable[Market]) -> FootballMatch:
-        return FootballMatch(
-            id=self.id,
-            kind=self.kind,
-            competition=self.competition,
-            markets=_wrap_markets(markets),
-            sport_region=self.sport_region,
-            start_date=self.start_date,
-            match_url=self.match_url,
-            home_team=self.home_team,
-            away_team=self.away_team,
-        )
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class TennisMatch(SportEvent):
+class CompetitorPairSportEvent(SportEvent):
     competitor1: str = ""
     competitor2: str = ""
 
@@ -193,35 +133,77 @@ class TennisMatch(SportEvent):
     def name(self) -> str:
         return f"{self.competitor1} / {self.competitor2}"
 
-    def _clone_with_markets(self, markets: Iterable[Market]) -> TennisMatch:
-        return TennisMatch(
-            id=self.id,
-            kind=self.kind,
-            competition=self.competition,
-            markets=_wrap_markets(markets),
-            sport_region=self.sport_region,
-            start_date=self.start_date,
-            match_url=self.match_url,
-            competitor1=self.competitor1,
-            competitor2=self.competitor2,
-        )
+
+class AmericanFootballMatch(HomeAwaySportEvent):
+    pass
 
 
-# ─── JSON deserialization ──────────────────────────────────────────────────
+class BaseballMatch(HomeAwaySportEvent):
+    pass
+
+
+class BasketballMatch(HomeAwaySportEvent):
+    pass
+
+
+class CricketMatch(HomeAwaySportEvent):
+    pass
+
+
+class FootballMatch(HomeAwaySportEvent):
+    pass
+
+
+class HandballMatch(HomeAwaySportEvent):
+    pass
+
+
+class HockeyMatch(HomeAwaySportEvent):
+    pass
+
+
+class RugbyLeagueMatch(HomeAwaySportEvent):
+    pass
+
+
+class BoxingFight(CompetitorPairSportEvent):
+    pass
+
+
+class MmaFight(CompetitorPairSportEvent):
+    pass
+
+
+class TennisMatch(CompetitorPairSportEvent):
+    pass
 
 
 def _parse_iso_datetime(value: str) -> datetime:
-    """Parse an ISO 8601 datetime string into a timezone-aware datetime (UTC if offsetless)."""
-    # Python 3.10 fromisoformat doesn't accept 'Z', normalize it.
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value)
 
 
-def sport_event_from_json(data: dict[str, Any]) -> SportEvent:
-    """Build the right SportEvent subclass from its wire JSON. Mirrors `SportEvent.fromJSON` in JS."""
-    kind: SportEventKind = data["kind"]
-    markets = tuple(market_from_json(m) for m in data.get("markets", []))
+_HOME_AWAY_EVENTS: dict[str, type[HomeAwaySportEvent]] = {
+    "se:american_football_match": AmericanFootballMatch,
+    "se:baseball_match": BaseballMatch,
+    "se:basketball_match": BasketballMatch,
+    "se:cricket_match": CricketMatch,
+    "se:football_match": FootballMatch,
+    "se:handball_match": HandballMatch,
+    "se:hockey_match": HockeyMatch,
+    "se:rugby_league_match": RugbyLeagueMatch,
+}
+_COMPETITOR_EVENTS: dict[str, type[CompetitorPairSportEvent]] = {
+    "se:boxing_fight": BoxingFight,
+    "se:mma_fight": MmaFight,
+    "se:tennis_match": TennisMatch,
+}
+
+
+def sport_event_from_json(data: dict[str, Any], *, strict: bool = False) -> SportEvent:
+    kind = str(data["kind"])
+    markets = tuple(market_from_json(m, strict=strict) for m in data.get("markets", []))
     common_kwargs: dict[str, Any] = {
         "id": SportEventId(str(data["id"])),
         "kind": kind,
@@ -231,22 +213,12 @@ def sport_event_from_json(data: dict[str, Any]) -> SportEvent:
         "start_date": _parse_iso_datetime(data["startDate"]) if data.get("startDate") else None,
         "match_url": data.get("matchUrl"),
     }
-    if kind == "se:basketball_match":
-        return BasketballMatch(
-            **common_kwargs,
-            home_team=data["homeTeam"],
-            away_team=data["awayTeam"],
-        )
-    if kind == "se:football_match":
-        return FootballMatch(
-            **common_kwargs,
-            home_team=data["homeTeam"],
-            away_team=data["awayTeam"],
-        )
-    if kind == "se:tennis_match":
-        return TennisMatch(
-            **common_kwargs,
-            competitor1=data["competitor1"],
-            competitor2=data["competitor2"],
-        )
-    raise ValueError(f"Unknown sport event kind: {kind!r}")
+    if kind in _HOME_AWAY_EVENTS:
+        home_away_cls = _HOME_AWAY_EVENTS[kind]
+        return home_away_cls(**common_kwargs, home_team=data["homeTeam"], away_team=data["awayTeam"])
+    if kind in _COMPETITOR_EVENTS:
+        competitor_cls = _COMPETITOR_EVENTS[kind]
+        return competitor_cls(**common_kwargs, competitor1=data["competitor1"], competitor2=data["competitor2"])
+    if strict:
+        raise ValueError(f"Unknown sport event kind: {kind!r}")
+    return UnknownSportEvent(**common_kwargs, raw=data)
